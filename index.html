@@ -135,3 +135,574 @@
       font-weight:900;
       letter-spacing:.3px;
     }
+    .tag{
+      display:inline-flex; align-items:center;
+      padding:6px 10px;
+      border-radius:999px;
+      border:1px solid rgba(255,255,255,.10);
+      background:rgba(255,255,255,.05);
+      color:var(--muted);
+      font-size:12px;
+      gap:8px;
+    }
+    .tag strong{color:var(--text)}
+
+    /* ✅ NIEUW: blok (2×3) is volledig correct */
+    .block-ok{
+      background: rgba(67,209,158,.12);
+    }
+    .block-ok-start::after{
+      content:"✓";
+      position:absolute;
+      top:6px;
+      left:8px;
+      font-size:12px;
+      font-weight:900;
+      color: var(--good);
+      opacity: .95;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="app">
+    <div class="card">
+      <h1>Mini Sudoku 6×6 – Speed Trainer</h1>
+      <p class="sub">
+        Oefen onbeperkt 6×6 sudoku’s met <b>timer</b> en <b>adaptieve moeilijkheid</b>.
+        Elke puzzel wordt pas gemaakt als jij klikt, dus je kunt nooit “vooraf spieken”.
+      </p>
+
+      <div class="row">
+        <button id="newBtn">Nieuwe sudoku</button>
+        <button id="resetBtn" class="secondary" title="Reset je niveau en statistieken">Reset niveau</button>
+      </div>
+
+      <div class="kpis">
+        <div class="pill">Niveau: <strong id="lvl">—</strong></div>
+        <div class="pill">Gevuld: <strong id="givens">—</strong></div>
+        <div class="pill">Doeltijd: <strong id="target">—</strong></div>
+        <div class="pill">Streak: <strong id="streak">—</strong></div>
+      </div>
+
+      <div class="hr"></div>
+
+      <div class="row">
+        <button id="checkBtn" class="secondary" title="Controleer of alles klopt">Check</button>
+        <button id="finishBtn" title="Afronden zodra je klaar bent">Klaar!</button>
+      </div>
+
+      <div class="status" id="status">
+        Klik op <b>Nieuwe sudoku</b> om te starten.
+      </div>
+
+      <p class="note">
+        Adaptatie: los je snel en foutloos op, dan worden puzzels moeilijker (minder gegeven cijfers).
+        Bij fouten wordt het iets makkelijker.
+      </p>
+      <p class="tiny">Tip: gebruik alleen cijfers 1–6. Backspace wist. Enter = “Klaar!”.</p>
+    </div>
+
+    <div class="card">
+      <div class="rightColTop">
+        <div>
+          <div class="timer" id="timer">00:00.0</div>
+          <div class="tag">Actieve puzzel: <strong id="puzzleId">—</strong></div>
+        </div>
+        <div class="row">
+          <div class="tag">Subblokken: <strong>2×3</strong></div>
+          <div class="tag">Uniek: <strong id="unique">—</strong></div>
+        </div>
+      </div>
+
+      <div class="hr"></div>
+
+      <div class="gridWrap">
+        <div class="grid" id="grid" aria-label="Sudoku grid"></div>
+      </div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  // 6x6 sudoku: digits 1..6, blocks are 2 rows x 3 cols
+  const N = 6;
+  const DIGITS = [1,2,3,4,5,6];
+  const BLOCK_R = 2, BLOCK_C = 3;
+
+  const el = (id) => document.getElementById(id);
+  const gridEl = el("grid");
+  const statusEl = el("status");
+  const timerEl = el("timer");
+  const lvlEl = el("lvl");
+  const givensEl = el("givens");
+  const targetEl = el("target");
+  const streakEl = el("streak");
+  const puzzleIdEl = el("puzzleId");
+  const uniqueEl = el("unique");
+
+  // ---------- Adaptive profile (stored) ----------
+  const STORE_KEY = "mini_sudoku_6x6_profile_v1";
+  const defaultProfile = () => ({
+    rating: 1000,
+    streak: 0,
+    lastTimes: [],
+    played: 0,
+    solved: 0
+  });
+
+  function loadProfile(){
+    try{
+      const raw = localStorage.getItem(STORE_KEY);
+      if(!raw) return defaultProfile();
+      const p = JSON.parse(raw);
+      return { ...defaultProfile(), ...p };
+    }catch(e){
+      return defaultProfile();
+    }
+  }
+  function saveProfile(p){
+    localStorage.setItem(STORE_KEY, JSON.stringify(p));
+  }
+  let profile = loadProfile();
+
+  function ratingToSettings(rating){
+    const r = Math.max(800, Math.min(1400, rating));
+    const t = (r - 800) / 600; // 0..1
+    const givens = Math.round(26 - 9 * t);     // easy ~26, hard ~17
+    const targetSec = Math.round(180 - 125 * t); // easy ~180s, hard ~55s
+    const label = t < 0.25 ? "Beginner"
+                : t < 0.5  ? "Gemiddeld"
+                : t < 0.75 ? "Gevorderd"
+                : "Expert";
+    return { givens, targetSec, label };
+  }
+
+  function updateHUD(currentGivens=null, uniqueFlag="—"){
+    const { targetSec, label } = ratingToSettings(profile.rating);
+    lvlEl.textContent = label;
+    targetEl.textContent = formatTime(targetSec * 1000);
+    streakEl.textContent = String(profile.streak);
+    givensEl.textContent = currentGivens == null ? "—" : String(currentGivens);
+    uniqueEl.textContent = uniqueFlag;
+  }
+
+  // ---------- Timer ----------
+  let t0 = null;
+  let raf = null;
+  let timerRunning = false;
+
+  function formatTime(ms){
+    const s = Math.floor(ms/1000);
+    const m = Math.floor(s/60);
+    const ss = s % 60;
+    const tenths = Math.floor((ms % 1000) / 100);
+    return `${String(m).padStart(2,"0")}:${String(ss).padStart(2,"0")}.${tenths}`;
+  }
+
+  function startTimer(){
+    t0 = performance.now();
+    timerRunning = true;
+    tick();
+  }
+  function stopTimer(){
+    timerRunning = false;
+    if(raf) cancelAnimationFrame(raf);
+    raf = null;
+  }
+  function elapsedMs(){
+    if(!t0) return 0;
+    return performance.now() - t0;
+  }
+  function tick(){
+    if(!timerRunning) return;
+    timerEl.textContent = formatTime(elapsedMs());
+    raf = requestAnimationFrame(tick);
+  }
+
+  // ---------- Sudoku helpers ----------
+  function idx(r,c){ return r*N + c; }
+
+  function shuffled(arr){
+    const a = arr.slice();
+    for(let i=a.length-1;i>0;i--){
+      const j = Math.floor(Math.random()*(i+1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  }
+
+  function inBlockStart(r, c){
+    return [Math.floor(r/BLOCK_R)*BLOCK_R, Math.floor(c/BLOCK_C)*BLOCK_C];
+  }
+
+  function isValid(board, r, c, val){
+    for(let cc=0; cc<N; cc++){
+      if(cc!==c && board[idx(r,cc)]===val) return false;
+    }
+    for(let rr=0; rr<N; rr++){
+      if(rr!==r && board[idx(rr,c)]===val) return false;
+    }
+    const [br, bc] = inBlockStart(r,c);
+    for(let rr=br; rr<br+BLOCK_R; rr++){
+      for(let cc=bc; cc<bc+BLOCK_C; cc++){
+        if((rr!==r || cc!==c) && board[idx(rr,cc)]===val) return false;
+      }
+    }
+    return true;
+  }
+
+  function candidates(board, r, c){
+    const opts = [];
+    for(const d of DIGITS){
+      if(isValid(board, r, c, d)) opts.push(d);
+    }
+    return opts;
+  }
+
+  function fillBoard(board){
+    let bestI = -1, bestCands = null;
+
+    for(let i=0;i<N*N;i++){
+      if(board[i]!==0) continue;
+      const r = Math.floor(i/N), c = i%N;
+      const cands = candidates(board, r, c);
+      if(cands.length===0) return false;
+      if(bestI===-1 || cands.length < bestCands.length){
+        bestI = i; bestCands = cands;
+        if(cands.length===1) break;
+      }
+    }
+    if(bestI===-1) return true;
+
+    const r = Math.floor(bestI/N), c = bestI%N;
+    for(const d of shuffled(bestCands)){
+      board[bestI] = d;
+      if(fillBoard(board)) return true;
+      board[bestI] = 0;
+    }
+    return false;
+  }
+
+  function countSolutions(board, limit=2){
+    let bestI = -1, bestCands = null;
+
+    for(let i=0;i<N*N;i++){
+      if(board[i]!==0) continue;
+      const r = Math.floor(i/N), c = i%N;
+      const cands = candidates(board, r, c);
+      if(cands.length===0) return 0;
+      if(bestI===-1 || cands.length < bestCands.length){
+        bestI = i; bestCands = cands;
+        if(cands.length===1) break;
+      }
+    }
+    if(bestI===-1) return 1;
+
+    let total = 0;
+    const r = Math.floor(bestI/N), c = bestI%N;
+    for(const d of bestCands){
+      board[bestI] = d;
+      total += countSolutions(board, limit - total);
+      if(total >= limit) { board[bestI]=0; return limit; }
+      board[bestI] = 0;
+    }
+    return total;
+  }
+
+  function generateFullSolution(){
+    const board = new Array(N*N).fill(0);
+    const firstRow = shuffled(DIGITS);
+    for(let c=0;c<N;c++) board[idx(0,c)] = firstRow[c];
+    if(!fillBoard(board)) throw new Error("Kon geen oplossing genereren.");
+    return board;
+  }
+
+  function makePuzzleFromSolution(solution, givensTarget){
+    const puzzle = solution.slice();
+    const positions = shuffled([...Array(N*N).keys()]);
+    let givens = N*N;
+
+    for(const pos of positions){
+      if(givens <= givensTarget) break;
+      const backup = puzzle[pos];
+      puzzle[pos] = 0;
+
+      const test = puzzle.slice();
+      const sols = countSolutions(test, 2);
+      if(sols !== 1){
+        puzzle[pos] = backup;
+      }else{
+        givens--;
+      }
+    }
+    return { puzzle, givens };
+  }
+
+  // ---------- UI / Game state ----------
+  let current = {
+    puzzle: null,
+    solution: null,
+    givens: 0,
+    fixed: new Set(),
+    id: null
+  };
+
+  function clearGrid(){
+    gridEl.innerHTML = "";
+  }
+
+  function cellClasses(r,c){
+    const classes = ["cell"];
+    if((c+1) % BLOCK_C === 0 && c !== N-1) classes.push("block-right");
+    if((r+1) % BLOCK_R === 0 && r !== N-1) classes.push("block-bottom");
+    return classes.join(" ");
+  }
+
+  function buildGrid(puzzle){
+    clearGrid();
+    for(let r=0;r<N;r++){
+      for(let c=0;c<N;c++){
+        const i = idx(r,c);
+        const cell = document.createElement("div");
+        cell.className = cellClasses(r,c);
+        cell.dataset.r = r; cell.dataset.c = c; cell.dataset.i = i;
+
+        const val = puzzle[i];
+        if(val !== 0){
+          const span = document.createElement("div");
+          span.className = "given";
+          span.textContent = String(val);
+          cell.appendChild(span);
+        }else{
+          const inp = document.createElement("input");
+          inp.inputMode = "numeric";
+          inp.maxLength = 1;
+          inp.autocomplete = "off";
+          inp.spellcheck = false;
+          inp.ariaLabel = `Rij ${r+1}, kolom ${c+1}`;
+
+          inp.addEventListener("input", () => {
+            const ch = (inp.value || "").replace(/[^1-6]/g,"");
+            inp.value = ch.slice(-1);
+            markConflicts();
+          });
+
+          inp.addEventListener("keydown", (e) => {
+            if(e.key === "Backspace" || e.key === "Delete") { inp.value=""; requestAnimationFrame(markConflicts); }
+            const move = (dr,dc) => {
+              e.preventDefault();
+              const nr = r+dr, nc = c+dc;
+              if(nr<0||nr>=N||nc<0||nc>=N) return;
+              const next = gridEl.querySelector(`div.cell[data-r="${nr}"][data-c="${nc}"] input`);
+              if(next) next.focus();
+            };
+            if(e.key==="ArrowUp") move(-1,0);
+            if(e.key==="ArrowDown") move(1,0);
+            if(e.key==="ArrowLeft") move(0,-1);
+            if(e.key==="ArrowRight") move(0,1);
+            if(e.key==="Enter") el("finishBtn").click();
+          });
+
+          cell.appendChild(inp);
+        }
+
+        gridEl.appendChild(cell);
+      }
+    }
+  }
+
+  function readBoardFromUI(){
+    const b = current.puzzle.slice();
+    for(let r=0;r<N;r++){
+      for(let c=0;c<N;c++){
+        const i = idx(r,c);
+        if(current.puzzle[i] !== 0) continue;
+        const inp = gridEl.querySelector(`div.cell[data-i="${i}"] input`);
+        const v = inp && inp.value ? parseInt(inp.value,10) : 0;
+        b[i] = (v>=1 && v<=6) ? v : 0;
+      }
+    }
+    return b;
+  }
+
+  // ✅ NIEUW: markeer blokken (2×3) die volledig correct zijn (6/6 goed)
+  function markBlocksCorrect(){
+    gridEl.querySelectorAll(".cell").forEach(cell => {
+      cell.classList.remove("block-ok", "block-ok-start");
+    });
+
+    if(!current.solution || !current.puzzle) return;
+
+    const b = readBoardFromUI();
+
+    for(let br=0; br<N; br+=BLOCK_R){
+      for(let bc=0; bc<N; bc+=BLOCK_C){
+        let allFilled = true;
+        let allCorrect = true;
+        const indices = [];
+
+        for(let r=br; r<br+BLOCK_R; r++){
+          for(let c=bc; c<bc+BLOCK_C; c++){
+            const i = idx(r,c);
+            indices.push(i);
+            if(b[i] === 0) allFilled = false;
+            if(b[i] !== current.solution[i]) allCorrect = false;
+          }
+        }
+
+        if(allFilled && allCorrect){
+          indices.forEach(i => {
+            const cell = gridEl.querySelector(`div.cell[data-i="${i}"]`);
+            if(cell) cell.classList.add("block-ok");
+          });
+          const startIndex = idx(br, bc);
+          const startCell = gridEl.querySelector(`div.cell[data-i="${startIndex}"]`);
+          if(startCell) startCell.classList.add("block-ok-start");
+        }
+      }
+    }
+  }
+
+  function markConflicts(){
+    gridEl.querySelectorAll(".cell").forEach(cell => cell.classList.remove("bad"));
+
+    const b = readBoardFromUI();
+    for(let r=0;r<N;r++){
+      for(let c=0;c<N;c++){
+        const i = idx(r,c);
+        const v = b[i];
+        if(v===0) continue;
+        if(!isValid(b, r, c, v)){
+          const cell = gridEl.querySelector(`div.cell[data-i="${i}"]`);
+          if(cell) cell.classList.add("bad");
+        }
+      }
+    }
+
+    // ✅ NIEUW: ook blokken checken
+    markBlocksCorrect();
+  }
+
+  function setStatus(html){
+    statusEl.innerHTML = html;
+  }
+
+  function newPuzzle(){
+    stopTimer();
+    timerEl.textContent = "00:00.0";
+    setStatus("Bezig met genereren…");
+
+    const settings = ratingToSettings(profile.rating);
+
+    const solution = generateFullSolution();
+    const { puzzle, givens } = makePuzzleFromSolution(solution, settings.givens);
+
+    current.solution = solution;
+    current.puzzle = puzzle;
+    current.givens = givens;
+    current.fixed = new Set(puzzle.map((v,i)=>v!==0?i:-1).filter(i=>i>=0));
+    current.id = Math.random().toString(16).slice(2,8).toUpperCase();
+
+    buildGrid(puzzle);
+    updateHUD(givens, "Ja");
+    puzzleIdEl.textContent = current.id;
+
+    setStatus(`Succes! Nieuwe puzzel <b>${current.id}</b>. Timer loopt. Succes 🚀`);
+    startTimer();
+    markConflicts(); // conflicts + blokken
+  }
+
+  function checkNow(){
+    if(!current.puzzle){
+      setStatus(`Klik eerst op <b>Nieuwe sudoku</b>.`);
+      return;
+    }
+    const b = readBoardFromUI();
+    let filled = 0;
+    for(const v of b) if(v!==0) filled++;
+    markConflicts();
+    const anyBad = gridEl.querySelector(".cell.bad") != null;
+
+    if(anyBad){
+      setStatus(`<span class="err">Er zitten conflicten in je invulling.</span> Corrigeer de rode vakjes. <b>Gevuld:</b> ${filled}/36`);
+    }else{
+      setStatus(`<span class="ok">Geen directe conflicten gevonden.</span> <b>Gevuld:</b> ${filled}/36`);
+    }
+  }
+
+  function finish(){
+    if(!current.puzzle){
+      setStatus(`Klik eerst op <b>Nieuwe sudoku</b>.`);
+      return;
+    }
+    const b = readBoardFromUI();
+
+    for(const v of b){
+      if(v===0){
+        setStatus(`<span class="err">Nog niet klaar.</span> Er zijn nog lege vakjes.`);
+        return;
+      }
+    }
+
+    for(let i=0;i<N*N;i++){
+      if(b[i] !== current.solution[i]){
+        markConflicts();
+        setStatus(`<span class="err">Niet correct.</span> Er klopt iets niet (rode vakjes).`);
+        profile.streak = 0;
+        profile.played += 1;
+        saveProfile(profile);
+        updateHUD(current.givens, "Ja");
+        return;
+      }
+    }
+
+    stopTimer();
+    const ms = elapsedMs();
+    profile.played += 1;
+    profile.solved += 1;
+    profile.streak += 1;
+    profile.lastTimes.push(ms);
+    profile.lastTimes = profile.lastTimes.slice(-10);
+
+    const { targetSec } = ratingToSettings(profile.rating);
+    const targetMs = targetSec * 1000;
+
+    const ratio = targetMs / ms;
+    const delta = Math.round(60 * (ratio - 1));
+    const bounded = Math.max(-80, Math.min(80, delta));
+    const streakBonus = Math.min(25, Math.round(profile.streak * 3));
+
+    profile.rating = Math.max(800, Math.min(1400, profile.rating + bounded + streakBonus));
+    saveProfile(profile);
+
+    gridEl.querySelectorAll(".cell").forEach(c => c.classList.add("goodflash"));
+    setTimeout(()=>gridEl.querySelectorAll(".cell").forEach(c => c.classList.remove("goodflash")), 550);
+
+    updateHUD(current.givens, "Ja");
+    setStatus(`<span class="ok">Correct opgelost!</span> Tijd: <b>${formatTime(ms)}</b>. Klik op <b>Nieuwe sudoku</b> voor de volgende.`);
+  }
+
+  function resetProfile(){
+    profile = defaultProfile();
+    saveProfile(profile);
+    updateHUD(null, "—");
+    setStatus(`Je niveau is gereset. Klik op <b>Nieuwe sudoku</b> om opnieuw te starten.`);
+    puzzleIdEl.textContent = "—";
+    uniqueEl.textContent = "—";
+    stopTimer();
+    timerEl.textContent = "00:00.0";
+    clearGrid();
+  }
+
+  el("newBtn").addEventListener("click", newPuzzle);
+  el("checkBtn").addEventListener("click", checkNow);
+  el("finishBtn").addEventListener("click", finish);
+  el("resetBtn").addEventListener("click", resetProfile);
+
+  updateHUD(null, "—");
+  clearGrid();
+})();
+</script>
+</body>
+</html>
